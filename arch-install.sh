@@ -489,8 +489,9 @@ install_de() {
     case $DE_CHOICE in
     0) # KDE Plasma
         warn "Устанавливается KDE Plasma 6..."
+        arch-chroot /mnt pacman -Sy --noconfirm
         arch-chroot /mnt pacman -S --noconfirm --needed \
-            plasma plasma-wayland-session sddm \
+            plasma sddm \
             dolphin konsole kate ark gwenview okular \
             plasma-nm plasma-pa kscreen haruna fastfetch \
             xdg-desktop-portal-kde \
