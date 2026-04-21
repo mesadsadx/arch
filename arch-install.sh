@@ -1,22 +1,10 @@
 #!/bin/bash
-# Arch Linux auto-installer for:
-# CPU: AMD Ryzen 7 7700
-# GPU: NVIDIA RTX 5070
-# RAM: 16GB DDR5
-# Disk: NVMe 1TB
-
 set -e
 
-RED='\033[0;31m'
-GREEN='\033[0;32m'
-YELLOW='\033[1;33m'
-BLUE='\033[0;34m'
-NC='\033[0m'
-
-info()    { echo -e "${GREEN}[+]${NC} $1"; }
-warn()    { echo -e "${YELLOW}[!]${NC} $1"; }
-error()   { echo -e "${RED}[✗]${NC} $1"; exit 1; }
-section() { echo -e "\n${BLUE}══════════════════════════════════════${NC}"; echo -e "${BLUE}  $1${NC}"; echo -e "${BLUE}══════════════════════════════════════${NC}\n"; }
+# ─── ЦВЕТА ────────────────────────────────────────────────────────────────────
+R='\033[0;31m'  G='\033[0;32m'  Y='\033[1;33m'
+B='\033[0;34m'  C='\033[0;36m'  W='\033[1;37m'
+DIM='\033[2m'   NC='\033[0m'
 
 # ─── НАСТРОЙКИ ────────────────────────────────────────────────────────────────
 USERNAME="metal"
@@ -24,189 +12,281 @@ HOSTNAME="arch"
 TIMEZONE="Europe/Moscow"
 LOCALE="ru_RU.UTF-8"
 KEYMAP="ru"
-# ──────────────────────────────────────────────────────────────────────────────
+PARALLEL_DL=10
+STEP=0
+TOTAL_STEPS=14
 
-check_uefi() {
-    [ -d /sys/firmware/efi ] || error "Не UEFI режим. Зайди в BIOS и включи UEFI."
+# ─── UI ФУНКЦИИ ───────────────────────────────────────────────────────────────
+header() {
+    clear
+    echo -e "${B}"
+    echo "  ╔══════════════════════════════════════════════════╗"
+    echo "  ║                                                  ║"
+    echo "  ║        Arch Linux Auto Installer v2.0            ║"
+    echo "  ║        Ryzen 7 7700  ·  RTX 5070  ·  NVMe       ║"
+    echo "  ║                                                  ║"
+    echo "  ╚══════════════════════════════════════════════════╝"
+    echo -e "${NC}"
 }
 
-check_internet() {
-    ping -c 1 archlinux.org &>/dev/null || error "Нет интернета. Подключись и запусти снова."
+progress() {
+    local pct=$(( STEP * 100 / TOTAL_STEPS ))
+    local filled=$(( pct / 5 ))
+    local empty=$(( 20 - filled ))
+    local bar=""
+    for ((i=0; i<filled; i++)); do bar+="█"; done
+    for ((i=0; i<empty; i++)); do bar+="░"; done
+    echo -e "  ${DIM}Прогресс:${NC} ${G}${bar}${NC} ${W}${pct}%${NC}  ${DIM}(${STEP}/${TOTAL_STEPS})${NC}\n"
 }
 
-select_disk() {
-    section "Выбор диска"
-    echo "Доступные диски:"
-    lsblk -d -o NAME,SIZE,MODEL | grep -v loop
-    echo ""
-    warn "Введи имя диска (например: nvme0n1 или sda)"
-    warn "НЕ вводи номер раздела!"
-    read -rp "Диск: /dev/" DISK
-    DISK="/dev/$DISK"
-    [ -b "$DISK" ] || error "Диск $DISK не найден"
+section() {
+    STEP=$((STEP + 1))
+    header
+    progress
+    echo -e "  ${B}┌─────────────────────────────────────────────────┐${NC}"
+    echo -e "  ${B}│${NC}  ${W}$1${NC}"
+    echo -e "  ${B}└─────────────────────────────────────────────────┘${NC}\n"
 }
 
-select_partitions() {
-    section "Выбор разделов"
-    echo "Разделы на $DISK:"
-    lsblk "$DISK" -o NAME,SIZE,TYPE,FSTYPE,LABEL,MOUNTPOINT
-    echo ""
-    warn "Укажи EFI раздел Windows (обычно nvme0n1p1, ~100-500MB, тип EFI)"
-    read -rp "EFI раздел: /dev/" EFI_PART
-    EFI_PART="/dev/$EFI_PART"
+info()  { echo -e "  ${G}✓${NC}  $1"; }
+warn()  { echo -e "  ${Y}!${NC}  $1"; }
+error() { echo -e "  ${R}✗${NC}  $1"; exit 1; }
+ask()   { echo -e "  ${C}?${NC}  $1"; }
 
-    warn "Укажи раздел для SWAP (если уже создал через cfdisk)"
-    warn "Если не создавал — нажми Enter, swap будет пропущен"
-    read -rp "SWAP раздел (Enter = пропустить): /dev/" SWAP_PART
-    [ -n "$SWAP_PART" ] && SWAP_PART="/dev/$SWAP_PART"
-
-    warn "Укажи раздел для корня / (Linux filesystem, всё свободное место)"
-    read -rp "ROOT раздел: /dev/" ROOT_PART
-    ROOT_PART="/dev/$ROOT_PART"
-
-    echo ""
-    info "EFI:  $EFI_PART"
-    info "SWAP: ${SWAP_PART:-пропущен}"
-    info "ROOT: $ROOT_PART"
-    echo ""
-    warn "Всё верно? Это НЕ удалит Windows. (y/n)"
-    read -rp "> " confirm
-    [ "$confirm" = "y" ] || error "Отменено"
+spinner() {
+    local pid=$1 msg=$2
+    local frames=('⠋' '⠙' '⠹' '⠸' '⠼' '⠴' '⠦' '⠧' '⠇' '⠏')
+    local i=0
+    while kill -0 "$pid" 2>/dev/null; do
+        printf "\r  ${B}${frames[$i]}${NC}  ${DIM}%s${NC}" "$msg"
+        i=$(( (i+1) % 10 ))
+        sleep 0.08
+    done
+    printf "\r  ${G}✓${NC}  %-50s\n" "$msg"
 }
 
-format_and_mount() {
-    section "Форматирование и монтирование"
+# ─── СТАРТ ────────────────────────────────────────────────────────────────────
+setfont ter-v16n 2>/dev/null || true
 
-    info "Форматирую ROOT ($ROOT_PART) в ext4..."
-    mkfs.ext4 -F "$ROOT_PART"
+header
+echo -e "  ${W}Этот скрипт установит Arch Linux с полным окружением.${NC}"
+echo -e "  ${DIM}Windows не будет удалена при выборе правильных разделов.${NC}\n"
 
-    if [ -n "$SWAP_PART" ]; then
-        info "Форматирую SWAP ($SWAP_PART)..."
-        mkswap "$SWAP_PART"
-        swapon "$SWAP_PART"
-    fi
+ask "Режим установки:"
+echo -e "    ${W}1${NC} — Dual Boot (рядом с Windows)"
+echo -e "    ${W}2${NC} — Чистая установка (VM / новый диск)\n"
+read -rp "  > " INSTALL_MODE
+[[ "$INSTALL_MODE" =~ ^[12]$ ]] || error "Введи 1 или 2"
 
-    info "Монтирую разделы..."
-    mount "$ROOT_PART" /mnt
-    mkdir -p /mnt/boot
-    mount "$EFI_PART" /mnt/boot
+echo ""
+ask "Продолжить? (y/n)"
+read -rp "  > " confirm
+[[ "$confirm" == "y" ]] || error "Отменено"
 
-    info "Готово"
-}
+# ─── ПРОВЕРКИ ─────────────────────────────────────────────────────────────────
+section "Проверка окружения"
 
-install_base() {
-    section "Установка базовой системы"
-    info "Это займёт несколько минут..."
+[ -d /sys/firmware/efi ] || error "Не UEFI режим — включи EFI в настройках VM/BIOS"
 
-    pacstrap /mnt \
-        base base-devel linux linux-headers linux-firmware \
-        amd-ucode \
-        networkmanager \
-        grub efibootmgr os-prober \
-        nano sudo git curl wget \
-        pipewire pipewire-alsa pipewire-pulse pipewire-jack wireplumber \
-        bluez bluez-utils \
-        ntfs-3g \
-        flatpak \
-        --noconfirm
+ping -c 1 -W 3 archlinux.org &>/dev/null || error "Нет интернета"
+info "UEFI — OK"
+info "Интернет — OK"
 
-    info "Базовая система установлена"
-}
+# ─── ЗЕРКАЛА ──────────────────────────────────────────────────────────────────
+section "Настройка быстрых зеркал"
 
-configure_system() {
-    section "Настройка системы"
+sed -i "s/#ParallelDownloads = 5/ParallelDownloads = ${PARALLEL_DL}/" /etc/pacman.conf
 
-    info "Генерирую fstab..."
-    genfstab -U /mnt >> /mnt/etc/fstab
+if command -v reflector &>/dev/null; then
+    (reflector --country Russia,Germany,Netherlands \
+        --protocol https --sort rate --latest 10 \
+        --save /etc/pacman.d/mirrorlist &>/dev/null) &
+    spinner $! "Подбираю быстрые зеркала..."
+    info "Зеркала обновлены"
+else
+    warn "reflector недоступен — используются дефолтные зеркала"
+fi
 
-    info "Настраиваю систему в chroot..."
-    arch-chroot /mnt /bin/bash <<CHROOT
+pacman -Sy --noconfirm &>/dev/null
+info "Репозитории синхронизированы"
+
+# ─── ДИСК ─────────────────────────────────────────────────────────────────────
+section "Выбор диска и разделов"
+
+echo -e "  ${DIM}Доступные диски:${NC}\n"
+lsblk -d -o NAME,SIZE,MODEL | grep -v loop | while read line; do
+    echo -e "    ${W}$line${NC}"
+done
+echo ""
+
+ask "Имя диска (например: nvme0n1 или sda)"
+read -rp "  /dev/" DISK
+DISK="/dev/$DISK"
+[ -b "$DISK" ] || error "Диск $DISK не найден"
+
+echo ""
+echo -e "  ${DIM}Разделы на $DISK:${NC}\n"
+lsblk "$DISK" -o NAME,SIZE,TYPE,FSTYPE,MOUNTPOINT | while read line; do
+    echo -e "    $line"
+done
+echo ""
+
+ask "EFI раздел (~512MB)"
+read -rp "  /dev/" EFI_PART
+EFI_PART="/dev/$EFI_PART"
+
+ask "SWAP раздел (Enter = пропустить)"
+read -rp "  /dev/" SWAP_PART
+[ -n "$SWAP_PART" ] && SWAP_PART="/dev/$SWAP_PART"
+
+ask "ROOT раздел (всё остальное)"
+read -rp "  /dev/" ROOT_PART
+ROOT_PART="/dev/$ROOT_PART"
+
+echo ""
+echo -e "  ${B}┌─────────────────────────────┐${NC}"
+echo -e "  ${B}│${NC}  EFI  → ${W}$EFI_PART${NC}"
+echo -e "  ${B}│${NC}  SWAP → ${W}${SWAP_PART:-пропущен}${NC}"
+echo -e "  ${B}│${NC}  ROOT → ${W}$ROOT_PART${NC}"
+echo -e "  ${B}└─────────────────────────────┘${NC}"
+echo ""
+ask "Всё верно? (y/n)"
+read -rp "  > " ok
+[[ "$ok" == "y" ]] || error "Отменено"
+
+# ─── ФОРМАТИРОВАНИЕ ───────────────────────────────────────────────────────────
+section "Форматирование разделов"
+
+if [ "$INSTALL_MODE" == "2" ]; then
+    (mkfs.fat -F32 "$EFI_PART" &>/dev/null) &
+    spinner $! "Форматирую EFI (FAT32)..."
+fi
+
+(mkfs.ext4 -F "$ROOT_PART" &>/dev/null) &
+spinner $! "Форматирую ROOT (ext4)..."
+
+if [ -n "$SWAP_PART" ]; then
+    (mkswap "$SWAP_PART" &>/dev/null && swapon "$SWAP_PART") &
+    spinner $! "Форматирую SWAP..."
+fi
+
+mount "$ROOT_PART" /mnt
+mkdir -p /mnt/boot
+mount "$EFI_PART" /mnt/boot
+info "Разделы смонтированы"
+
+# ─── БАЗОВАЯ СИСТЕМА ──────────────────────────────────────────────────────────
+section "Установка базовой системы"
+warn "Это займёт несколько минут..."
+echo ""
+
+pacstrap /mnt \
+    base base-devel linux linux-headers linux-firmware \
+    amd-ucode \
+    networkmanager \
+    grub efibootmgr os-prober \
+    nano sudo git curl wget \
+    pipewire pipewire-alsa pipewire-pulse pipewire-jack wireplumber \
+    bluez bluez-utils \
+    ntfs-3g flatpak \
+    terminus-font \
+    --noconfirm 2>&1 | grep -E "^\(|error" | while read line; do
+        echo -e "    ${DIM}$line${NC}"
+    done
+
+info "Базовая система установлена"
+
+genfstab -U /mnt >> /mnt/etc/fstab
+info "fstab сгенерирован"
+
+# ─── НАСТРОЙКА СИСТЕМЫ ────────────────────────────────────────────────────────
+section "Настройка системы"
+
+arch-chroot /mnt /bin/bash <<CHROOT
 set -e
 
+# Параллельные загрузки в chroot
+sed -i "s/#ParallelDownloads = 5/ParallelDownloads = ${PARALLEL_DL}/" /etc/pacman.conf
+sed -i "/\[multilib\]/,/Include/{s/^#//}" /etc/pacman.conf || true
+
 # Временная зона
-ln -sf /usr/share/zoneinfo/$TIMEZONE /etc/localtime
+ln -sf /usr/share/zoneinfo/${TIMEZONE} /etc/localtime
 hwclock --systohc
 
 # Локаль
 sed -i 's/#en_US.UTF-8/en_US.UTF-8/' /etc/locale.gen
 sed -i 's/#ru_RU.UTF-8/ru_RU.UTF-8/' /etc/locale.gen
-locale-gen
-echo "LANG=$LOCALE" > /etc/locale.conf
-echo "KEYMAP=$KEYMAP" > /etc/vconsole.conf
+locale-gen &>/dev/null
+echo "LANG=${LOCALE}" > /etc/locale.conf
+echo "KEYMAP=${KEYMAP}" > /etc/vconsole.conf
+echo "FONT=ter-v16n" >> /etc/vconsole.conf
 
 # Hostname
-echo "$HOSTNAME" > /etc/hostname
+echo "${HOSTNAME}" > /etc/hostname
 cat > /etc/hosts <<EOF
 127.0.0.1   localhost
 ::1         localhost
-127.0.1.1   $HOSTNAME.localdomain $HOSTNAME
+127.0.1.1   ${HOSTNAME}.localdomain ${HOSTNAME}
 EOF
 
 # Пользователь
-useradd -mG wheel,video,audio,input,storage,optical $USERNAME
+useradd -mG wheel,video,audio,input,storage,optical ${USERNAME}
 echo "%wheel ALL=(ALL:ALL) ALL" >> /etc/sudoers
 
 # Сервисы
-systemctl enable NetworkManager
-systemctl enable bluetooth
-
-# Bluetooth автовключение
+systemctl enable NetworkManager &>/dev/null
+systemctl enable bluetooth &>/dev/null
 sed -i 's/#AutoEnable=false/AutoEnable=true/' /etc/bluetooth/main.conf 2>/dev/null || true
 
 # Flathub
-flatpak remote-add --if-not-exists flathub https://dl.flathub.org/repo/flathub.flatpakrepo
-
+flatpak remote-add --if-not-exists flathub https://dl.flathub.org/repo/flathub.flatpakrepo &>/dev/null || true
 CHROOT
 
-    info "Система настроена"
-}
+info "Система настроена"
 
-set_passwords() {
-    section "Установка паролей"
-    warn "Введи пароль для ROOT:"
-    arch-chroot /mnt passwd
+# ─── ПАРОЛИ ───────────────────────────────────────────────────────────────────
+section "Установка паролей"
 
-    warn "Введи пароль для пользователя $USERNAME:"
-    arch-chroot /mnt passwd "$USERNAME"
-}
+warn "Пароль для ROOT:"
+arch-chroot /mnt passwd
 
-install_grub() {
-    section "Установка GRUB"
+warn "Пароль для ${USERNAME}:"
+arch-chroot /mnt passwd "$USERNAME"
 
-    arch-chroot /mnt /bin/bash <<CHROOT
-sed -i 's/#GRUB_DISABLE_OS_PROBER=false/GRUB_DISABLE_OS_PROBER=false/' /etc/default/grub
+# ─── GRUB ─────────────────────────────────────────────────────────────────────
+section "Установка загрузчика GRUB"
+
+arch-chroot /mnt /bin/bash <<CHROOT
+set -e
 echo "GRUB_DISABLE_OS_PROBER=false" >> /etc/default/grub
+sed -i 's/GRUB_TIMEOUT=5/GRUB_TIMEOUT=3/' /etc/default/grub
 
-grub-install --target=x86_64-efi --efi-directory=/boot --bootloader-id=GRUB
-grub-mkconfig -o /boot/grub/grub.cfg
+grub-install --target=x86_64-efi --efi-directory=/boot \
+    --bootloader-id=GRUB --quiet
+grub-mkconfig -o /boot/grub/grub.cfg &>/dev/null
 CHROOT
 
-    info "GRUB установлен"
-}
+info "GRUB установлен"
 
-install_kde() {
-    section "Установка KDE Plasma"
-    info "Это займёт несколько минут..."
+# ─── KDE PLASMA ───────────────────────────────────────────────────────────────
+section "Установка KDE Plasma 6"
+warn "Это займёт несколько минут..."
+echo ""
 
-    arch-chroot /mnt /bin/bash <<CHROOT
-pacman -S --noconfirm \
-    plasma \
-    plasma-wayland-session \
-    sddm \
-    dolphin konsole kate \
-    ark gwenview okular \
-    plasma-nm plasma-pa \
-    kscreen \
-    haruna \
-    fastfetch \
+arch-chroot /mnt /bin/bash <<CHROOT
+pacman -S --noconfirm --needed \
+    plasma plasma-wayland-session sddm \
+    dolphin konsole kate ark gwenview okular \
+    plasma-nm plasma-pa kscreen \
+    haruna fastfetch \
     xdg-desktop-portal-kde \
-    --noconfirm
+    2>&1 | grep -E "^\(|error" | sed 's/^/    /'
 
-systemctl enable sddm
+systemctl enable sddm &>/dev/null
 
-# Alt+Shift переключение раскладки через kxkbrc
-mkdir -p /home/$USERNAME/.config
-cat > /home/$USERNAME/.config/kxkbrc <<EOF
+# Alt+Shift раскладка
+mkdir -p /home/${USERNAME}/.config
+cat > /home/${USERNAME}/.config/kxkbrc <<EOF
 [Layout]
 DisplayNames=,
 LayoutList=us,ru
@@ -221,259 +301,158 @@ SwitchMode=Global
 UseConfigFile=true
 VariantList=,
 EOF
-chown -R $USERNAME:$USERNAME /home/$USERNAME/.config
+chown -R ${USERNAME}:${USERNAME} /home/${USERNAME}/.config
 CHROOT
 
-    info "KDE Plasma установлен"
-}
+info "KDE Plasma установлен"
 
-install_nvidia() {
-    section "Установка драйверов NVIDIA RTX 5070"
+# ─── NVIDIA ───────────────────────────────────────────────────────────────────
+section "Драйверы NVIDIA RTX 5070"
 
-    arch-chroot /mnt /bin/bash <<CHROOT
-pacman -S --noconfirm \
-    nvidia-open \
-    nvidia-open-dkms \
-    nvidia-utils \
-    lib32-nvidia-utils \
-    nvtop \
-    nvidia-settings
+arch-chroot /mnt /bin/bash <<CHROOT
+pacman -S --noconfirm --needed \
+    nvidia-open nvidia-open-dkms nvidia-utils \
+    lib32-nvidia-utils nvtop nvidia-settings \
+    2>&1 | grep -E "^\(|error" | sed 's/^/    /'
 
-# Модули в initramfs
 sed -i 's/^MODULES=.*/MODULES=(nvidia nvidia_modeset nvidia_uvm nvidia_drm)/' /etc/mkinitcpio.conf
-
-# DRM modesetting
 sed -i 's/GRUB_CMDLINE_LINUX_DEFAULT="\(.*\)"/GRUB_CMDLINE_LINUX_DEFAULT="\1 nvidia_drm.modeset=1"/' /etc/default/grub
 
-mkinitcpio -P
-grub-mkconfig -o /boot/grub/grub.cfg
-
-systemctl enable nvidia-suspend nvidia-hibernate nvidia-resume 2>/dev/null || true
+mkinitcpio -P &>/dev/null
+grub-mkconfig -o /boot/grub/grub.cfg &>/dev/null
+systemctl enable nvidia-suspend nvidia-hibernate nvidia-resume &>/dev/null 2>&1 || true
 CHROOT
 
-    info "Драйвер NVIDIA установлен"
-}
+info "Драйвер NVIDIA установлен"
 
-install_gaming() {
-    section "Установка Steam, Lutris, Heroic и игровых пакетов"
+# ─── ИГРЫ ─────────────────────────────────────────────────────────────────────
+section "Steam · Lutris · Heroic · GameMode"
 
-    arch-chroot /mnt /bin/bash <<CHROOT
-# Включаем multilib
-sed -i '/^#\[multilib\]/s/^#//' /etc/pacman.conf
-sed -i '/^\[multilib\]/{n;s/^#//}' /etc/pacman.conf
-pacman -Sy
-
-pacman -S --noconfirm \
-    steam \
-    lutris \
-    lib32-mesa \
-    wine \
-    wine-mono \
-    winetricks \
-    gamemode \
-    lib32-gamemode \
-    mangohud \
-    lib32-mangohud \
-    --noconfirm
+arch-chroot /mnt /bin/bash <<CHROOT
+pacman -Sy --noconfirm --needed \
+    steam lutris \
+    lib32-mesa lib32-nvidia-utils \
+    wine wine-mono winetricks \
+    gamemode lib32-gamemode \
+    mangohud lib32-mangohud \
+    gamescope \
+    2>&1 | grep -E "^\(|error" | sed 's/^/    /'
 CHROOT
 
-    info "Steam, Lutris и игровые пакеты установлены"
-}
+info "Игровые пакеты установлены"
 
-install_aur() {
-    section "Установка yay (AUR helper)"
+# ─── YAY ──────────────────────────────────────────────────────────────────────
+section "Установка yay (AUR)"
 
-    arch-chroot /mnt /bin/bash <<CHROOT
+arch-chroot /mnt /bin/bash <<CHROOT
 cd /tmp
-sudo -u $USERNAME git clone https://aur.archlinux.org/yay.git
+sudo -u ${USERNAME} git clone https://aur.archlinux.org/yay.git &>/dev/null
 cd yay
-sudo -u $USERNAME makepkg -si --noconfirm
+sudo -u ${USERNAME} makepkg -si --noconfirm &>/dev/null
 CHROOT
 
-    info "yay установлен"
-}
+info "yay установлен"
 
-install_apps() {
-    section "Установка приложений (AUR + pacman)"
+# ─── ПРИЛОЖЕНИЯ ───────────────────────────────────────────────────────────────
+section "Приложения"
 
-    arch-chroot /mnt /bin/bash <<CHROOT
-# Системные утилиты
-pacman -S --noconfirm \
-    htop \
-    p7zip \
-    unrar \
-    obs-studio \
-    xdg-utils
+arch-chroot /mnt /bin/bash <<CHROOT
+# Системные
+pacman -S --noconfirm --needed \
+    obs-studio htop p7zip unrar xdg-utils \
+    2>&1 | grep -E "^\(|error" | sed 's/^/    /'
 
-# VS Code (с Microsoft маркетплейсом)
-sudo -u $USERNAME yay -S --noconfirm visual-studio-code-bin
+# AUR пакеты — параллельно где возможно
+sudo -u ${USERNAME} yay -S --noconfirm \
+    visual-studio-code-bin \
+    zen-browser-bin \
+    ayugram-desktop \
+    discord \
+    spotify \
+    heroic-games-launcher-bin \
+    modrinth-app \
+    gruvbox-plus-icon-theme-git \
+    2>&1 | grep -E "^\(|==>|error" | sed 's/^/    /'
 
-# Zen Browser (форк Firefox с современным UI)
-sudo -u $USERNAME yay -S --noconfirm zen-browser-bin
-
-# Ayugram (форк Telegram)
-sudo -u $USERNAME yay -S --noconfirm ayugram-desktop
-
-# Discord с фиксом цветов для NVIDIA
-sudo -u $USERNAME yay -S --noconfirm discord
-# Фикс цветового искажения на NVIDIA — меняем флаг запуска
+# Фикс цветов Discord на NVIDIA
 sed -i 's|Exec=/usr/bin/discord|Exec=/usr/bin/discord --use-gl=desktop|' \
     /usr/share/applications/discord.desktop 2>/dev/null || true
 
-# Spotify
-sudo -u $USERNAME yay -S --noconfirm spotify
-
-# Heroic Games Launcher (Epic / GOG / Amazon)
-sudo -u $USERNAME yay -S --noconfirm heroic-games-launcher-bin
-
-# Modrinth App (Minecraft лаунчер)
-sudo -u $USERNAME yay -S --noconfirm modrinth-app
-
-CHROOT
-
-    info "Приложения установлены"
-}
-
-install_claude() {
-    section "Установка Claude Code"
-
-    arch-chroot /mnt /bin/bash <<CHROOT
-pacman -S --noconfirm nodejs npm
-npm install -g @anthropic-ai/claude-code
-CHROOT
-
-    info "Claude Code установлен — при первом запуске: claude"
-}
-
-install_theming() {
-    section "Кастомизация KDE (тема как на скрине)"
-
-    arch-chroot /mnt /bin/bash <<CHROOT
-# Иконки Gruvbox-Plus-Dark
-sudo -u $USERNAME yay -S --noconfirm gruvbox-plus-icon-theme-git
-
-# Виджет Now Playing для Spotify на рабочем столе
-sudo -u $USERNAME yay -S --noconfirm plasma6-applets-window-title 2>/dev/null || true
+# Claude Code
+pacman -S --noconfirm nodejs npm &>/dev/null
+npm install -g @anthropic-ai/claude-code &>/dev/null
 
 # fastfetch конфиг
-mkdir -p /home/$USERNAME/.config/fastfetch
-cat > /home/$USERNAME/.config/fastfetch/config.jsonc <<'EOF'
+mkdir -p /home/${USERNAME}/.config/fastfetch
+cat > /home/${USERNAME}/.config/fastfetch/config.jsonc <<'EOF'
 {
   "$schema": "https://github.com/fastfetch-cli/fastfetch/raw/dev/doc/json_schema.json",
-  "display": {
-    "separator": ": ",
-    "color": {
-      "keys": "blue",
-      "title": "blue"
-    }
-  },
+  "display": { "separator": "  ", "color": { "keys": "blue", "title": "cyan" } },
   "modules": [
     "title", "separator",
     "os", "host", "kernel", "uptime",
     "packages", "shell", "display",
-    "de", "wm", "wmtheme", "theme",
-    "icons", "font", "cursor", "terminal",
-    "cpu", "gpu", "memory", "swap",
-    "disk", "localip", "locale",
+    "de", "wm", "theme", "icons",
+    "terminal", "cpu", "gpu",
+    "memory", "disk", "locale",
     "break", "colors"
   ]
 }
 EOF
-
-chown -R $USERNAME:$USERNAME /home/$USERNAME/.config/fastfetch
-
-# Добавляем fastfetch в .bashrc
-echo 'fastfetch' >> /home/$USERNAME/.bashrc
-
+echo 'fastfetch' >> /home/${USERNAME}/.bashrc
+chown -R ${USERNAME}:${USERNAME} /home/${USERNAME}/.config
 CHROOT
 
-    info "Тема и кастомизация настроены"
-    warn "После входа: Параметры системы → Внешний вид → Иконки → Gruvbox-Plus-Dark"
-    warn "Тема: Breeze Dark (встроена в KDE)"
-}
+info "Все приложения установлены"
 
-configure_xbox_dns() {
-    section "Настройка Xbox DNS"
+# ─── XBOX DNS ─────────────────────────────────────────────────────────────────
+section "Xbox DNS + финальная настройка"
 
-    arch-chroot /mnt /bin/bash <<CHROOT
-cat > /home/$USERNAME/apply-xbox-dns.sh <<'EOF'
+arch-chroot /mnt /bin/bash <<CHROOT
+cat > /home/${USERNAME}/apply-xbox-dns.sh <<'EOF'
 #!/bin/bash
-CONN=\$(nmcli -t -f NAME connection show --active | head -1)
-nmcli connection modify "\$CONN" ipv4.dns "13.107.237.38 13.107.238.38"
-nmcli connection modify "\$CONN" ipv4.ignore-auto-dns yes
-nmcli connection up "\$CONN"
-echo "Xbox DNS применён для: \$CONN"
+CONN=$(nmcli -t -f NAME connection show --active | head -1)
+nmcli connection modify "$CONN" ipv4.dns "13.107.237.38 13.107.238.38"
+nmcli connection modify "$CONN" ipv4.ignore-auto-dns yes
+nmcli connection up "$CONN"
+echo "Xbox DNS применён: $CONN"
 EOF
-chmod +x /home/$USERNAME/apply-xbox-dns.sh
-chown $USERNAME:$USERNAME /home/$USERNAME/apply-xbox-dns.sh
+chmod +x /home/${USERNAME}/apply-xbox-dns.sh
+chown ${USERNAME}:${USERNAME} /home/${USERNAME}/apply-xbox-dns.sh
 CHROOT
 
-    info "Скрипт Xbox DNS сохранён в ~/apply-xbox-dns.sh"
-}
+info "Xbox DNS скрипт: ~/apply-xbox-dns.sh"
 
-finish() {
-    section "Установка завершена!"
-    echo ""
-    info "Установлено:"
-    echo "  • KDE Plasma 6 (Wayland) + Breeze Dark"
-    echo "  • NVIDIA nvidia-open (RTX 5070)"
-    echo "  • Steam + Lutris + Heroic Games Launcher"
-    echo "  • Wine + GameMode + MangoHud"
-    echo "  • Zen Browser, Ayugram, Discord, Spotify"
-    echo "  • VS Code, OBS, Haruna, Ark"
-    echo "  • Modrinth App (Minecraft)"
-    echo "  • Flatpak + Flathub"
-    echo "  • yay (AUR)"
-    echo "  • fastfetch + Gruvbox иконки"
-    echo "  • Alt+Shift переключение раскладки"
-    echo ""
-    info "После перезагрузки:"
-    echo "  1. Войди под пользователем: $USERNAME"
-    echo "  2. Запусти: bash ~/apply-xbox-dns.sh"
-    echo "  3. Параметры системы → Иконки → Gruvbox-Plus-Dark"
-    echo "  4. В Steam включи Proton для всех игр"
-    echo ""
-    warn "Готов перезагрузиться? (y/n)"
-    read -rp "> " do_reboot
-    if [ "$do_reboot" = "y" ]; then
-        umount -R /mnt
-        reboot
-    else
-        info "Запусти вручную: umount -R /mnt && reboot"
-    fi
-}
+# ─── ФИНАЛ ────────────────────────────────────────────────────────────────────
+header
+STEP=$TOTAL_STEPS
+progress
 
-# ─── ГЛАВНЫЙ ЗАПУСК ───────────────────────────────────────────────────────────
-clear
-echo -e "${BLUE}"
-echo "  ╔═══════════════════════════════════════╗"
-echo "  ║     Arch Linux Auto Installer         ║"
-echo "  ║     Ryzen 7 7700 + RTX 5070           ║"
-echo "  ╚═══════════════════════════════════════╝"
-echo -e "${NC}"
-echo ""
-warn "Этот скрипт установит Arch Linux рядом с Windows"
-warn "Windows НЕ будет удалена если выберешь правильные разделы"
-echo ""
-warn "Продолжить? (y/n)"
-read -rp "> " start
-[ "$start" = "y" ] || error "Отменено"
+echo -e "  ${G}╔══════════════════════════════════════════════════╗${NC}"
+echo -e "  ${G}║           Установка завершена успешно!           ║${NC}"
+echo -e "  ${G}╚══════════════════════════════════════════════════╝${NC}\n"
 
-check_uefi
-check_internet
-select_disk
-select_partitions
-format_and_mount
-install_base
-configure_system
-set_passwords
-install_grub
-install_kde
-install_nvidia
-install_gaming
-install_aur
-install_apps
-install_claude
-install_theming
-configure_xbox_dns
-finish
+echo -e "  ${W}Установлено:${NC}"
+echo -e "  ${DIM}├${NC} KDE Plasma 6 · Breeze Dark · Gruvbox иконки"
+echo -e "  ${DIM}├${NC} NVIDIA nvidia-open · Wayland · DRM"
+echo -e "  ${DIM}├${NC} Steam · Lutris · Heroic · Wine · GameMode · gamescope"
+echo -e "  ${DIM}├${NC} Zen Browser · Ayugram · Discord · Spotify"
+echo -e "  ${DIM}├${NC} VS Code · OBS · Haruna · Ark · Flatpak"
+echo -e "  ${DIM}├${NC} Modrinth App · Claude Code · yay"
+echo -e "  ${DIM}└${NC} Alt+Shift раскладка · fastfetch · Xbox DNS скрипт\n"
+
+echo -e "  ${W}После перезагрузки:${NC}"
+echo -e "  ${DIM}1.${NC} Войди как ${W}${USERNAME}${NC}"
+echo -e "  ${DIM}2.${NC} ${W}bash ~/apply-xbox-dns.sh${NC}"
+echo -e "  ${DIM}3.${NC} Параметры системы → Иконки → ${W}Gruvbox-Plus-Dark${NC}"
+echo -e "  ${DIM}4.${NC} Steam → Настройки → Совместимость → ${W}Proton для всех игр${NC}"
+echo -e "  ${DIM}5.${NC} CS2 лаунч опции: ${W}gamescope -w 1280 -h 960 -W 1920 -H 1080 -f -- %command%${NC}\n"
+
+ask "Перезагрузиться сейчас? (y/n)"
+read -rp "  > " do_reboot
+if [ "$do_reboot" == "y" ]; then
+    umount -R /mnt
+    reboot
+else
+    info "Запусти вручную: umount -R /mnt && reboot"
+fi
