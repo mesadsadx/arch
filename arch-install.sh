@@ -112,10 +112,11 @@ arrow_menu() {
     local options=("$@")
     local selected=0
     local count=${#options[@]}
+    local key key2
 
     tput civis 2>/dev/null || true
-    while true; do
-        # Рисуем меню
+
+    _draw_menu() {
         echo -e "  ${C}${BOLD}$prompt${NC}\n"
         for i in "${!options[@]}"; do
             if [ "$i" -eq "$selected" ]; then
@@ -124,24 +125,32 @@ arrow_menu() {
                 echo -e "    ${DIM}${options[$i]}${NC}"
             fi
         done
-        echo -e "\n  ${DIM}↑↓ выбор   Enter подтвердить${NC}"
+        echo -e "\n  ${DIM}стрелки ↑↓ · Enter — подтвердить${NC}"
+    }
 
-        # Читаем клавишу
-        IFS= read -rsn1 key
+    _draw_menu
+
+    while true; do
+        # Читаем клавишу — без set -e влияния
+        IFS= read -rsn1 key || true
+
         if [[ "$key" == $'\x1b' ]]; then
-            read -rsn2 -t 0.1 key2
+            key2=""
+            IFS= read -rsn2 -t 0.15 key2 || true
             case "$key2" in
-                '[A') [ "$selected" -gt 0 ] && ((selected--)) ;;
-                '[B') [ "$selected" -lt $((count-1)) ] && ((selected++)) ;;
+                '[A') [ "$selected" -gt 0 ] && selected=$((selected - 1)) ;;
+                '[B') [ "$selected" -lt $((count - 1)) ] && selected=$((selected + 1)) ;;
             esac
-        elif [[ "$key" == "" ]]; then
+        elif [[ -z "$key" ]]; then
             break
         fi
 
-        # Стираем меню
-        tput cuu $((count + 4)) 2>/dev/null
-        tput ed 2>/dev/null
+        # Перерисовываем меню на месте
+        tput cuu $((count + 4)) 2>/dev/null || true
+        tput ed 2>/dev/null || true
+        _draw_menu
     done
+
     tput cnorm 2>/dev/null || true
     MENU_RESULT=$selected
 }
