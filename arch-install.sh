@@ -32,6 +32,21 @@ warn()   { echo -e "  ${Y}▲${NC}  $1"; }
 error()  { echo -e "\n  ${R}✗  $1${NC}\n"; exit 1; }
 dim()    { echo -e "  ${DIM}$1${NC}"; }
 
+# Проверка что /mnt смонтирован и система установлена
+check_mnt() {
+    mountpoint -q /mnt || error "/mnt не смонтирован! Запусти скрипт заново."
+    [ -f /mnt/usr/bin/bash ] || error "Базовая система не установлена в /mnt. Запусти заново."
+}
+
+# Запуск spinner с проверкой кода выхода фонового процесса
+run_bg() {
+    local msg="$1"; shift
+    "$@" &>/tmp/arch_install.log &
+    local pid=$!
+    spinner $pid "$msg"
+    wait $pid || { cat /tmp/arch_install.log; error "Ошибка: $msg"; }
+}
+
 spinner() {
     local pid=$1 msg=$2
     local frames=('⠋' '⠙' '⠹' '⠸' '⠼' '⠴' '⠦' '⠧' '⠇' '⠏')
@@ -346,25 +361,25 @@ setup_mirrors() {
     sed -i "s/#ParallelDownloads = 5/ParallelDownloads = ${PARALLEL_DL}/" /etc/pacman.conf 2>/dev/null || true
 
     if command -v reflector &>/dev/null; then
-        (reflector --country Russia,Germany,Netherlands --protocol https \
-            --sort rate --latest 10 --save /etc/pacman.d/mirrorlist &>/dev/null) &
-        spinner $! "Выбираю быстрые зеркала (reflector)"
+        run_bg "Выбираю быстрые зеркала (reflector)" \
+            reflector --country Russia,Germany,Netherlands --protocol https \
+            --sort rate --latest 10 --save /etc/pacman.d/mirrorlist
     else
         warn "reflector не найден — дефолтные зеркала"
     fi
 
-    (pacman -Sy --noconfirm &>/dev/null) &
-    spinner $! "Синхронизирую репозитории"
+    run_bg "Синхронизирую репозитории" pacman -Sy --noconfirm
 }
 
 # ─── БАЗОВАЯ СИСТЕМА ──────────────────────────────────────────────────────────
 install_base() {
-    section "Базовая система (337 пакетов)"
+    section "Базовая система"
 
     warn "Идёт загрузка — может занять несколько минут..."
     echo ""
 
-    pacstrap /mnt \
+    # Запускаем напрямую без pipe чтобы set -e работал корректно
+    pacstrap -K /mnt \
         base base-devel linux linux-headers linux-firmware \
         "$UCODE" \
         networkmanager \
@@ -374,10 +389,11 @@ install_base() {
         bluez bluez-utils \
         ntfs-3g flatpak \
         terminus-font \
-        --noconfirm 2>&1 | grep "^\(.*\)" | while IFS= read -r line; do
-            printf "\r  ${DIM}%-60s${NC}" "$line"
-        done
-    echo ""
+        --noconfirm || error "pacstrap завершился с ошибкой. Проверь интернет и разделы."
+
+    # Проверяем что система реально установилась
+    [ -f /mnt/usr/bin/bash ] || error "pacstrap не установил систему — /mnt/usr/bin/bash не найден"
+
     info "Базовая система установлена"
 
     genfstab -U /mnt >> /mnt/etc/fstab
@@ -387,6 +403,7 @@ install_base() {
 # ─── СИСТЕМА ──────────────────────────────────────────────────────────────────
 configure_system() {
     section "Настройка системы"
+    check_mnt
 
     (arch-chroot /mnt /bin/bash <<CHROOT
 set -e
@@ -414,41 +431,42 @@ systemctl enable bluetooth &>/dev/null
 sed -i 's/#AutoEnable=false/AutoEnable=true/' /etc/bluetooth/main.conf 2>/dev/null || true
 flatpak remote-add --if-not-exists flathub https://dl.flathub.org/repo/flathub.flatpakrepo &>/dev/null || true
 CHROOT
-    ) &
-    spinner $! "Настройка локали, пользователя, сервисов"
+    ) || error "Ошибка настройки системы"
     info "Система настроена"
 }
 
 # ─── ПАРОЛИ ───────────────────────────────────────────────────────────────────
 set_passwords() {
     section "Пароли"
+    check_mnt
 
     warn "Пароль для root:"
-    arch-chroot /mnt passwd
+    arch-chroot /mnt /usr/bin/passwd || error "Не удалось установить пароль root"
 
     warn "Пароль для ${USERNAME}:"
-    arch-chroot /mnt passwd "$USERNAME"
+    arch-chroot /mnt /usr/bin/passwd "$USERNAME" || error "Не удалось установить пароль $USERNAME"
 }
 
 # ─── GRUB ─────────────────────────────────────────────────────────────────────
 install_grub() {
     section "Загрузчик GRUB"
+    check_mnt
 
-    (arch-chroot /mnt /bin/bash <<CHROOT
+    arch-chroot /mnt /bin/bash <<CHROOT || error "Ошибка установки GRUB"
 set -e
 echo "GRUB_DISABLE_OS_PROBER=false" >> /etc/default/grub
 sed -i 's/GRUB_TIMEOUT=5/GRUB_TIMEOUT=3/' /etc/default/grub
-grub-install --target=x86_64-efi --efi-directory=/boot --bootloader-id=GRUB --quiet &>/dev/null
-grub-mkconfig -o /boot/grub/grub.cfg &>/dev/null
+grub-install --target=x86_64-efi --efi-directory=/boot --bootloader-id=GRUB
+grub-mkconfig -o /boot/grub/grub.cfg
 CHROOT
-    ) &
-    spinner $! "Устанавливаю GRUB"
+
     info "GRUB установлен"
 }
 
 # ─── УСТАНОВКА DE ─────────────────────────────────────────────────────────────
 install_de() {
     section "Рабочее окружение"
+    check_mnt
 
     case $DE_CHOICE in
     0) # KDE Plasma
@@ -458,8 +476,7 @@ install_de() {
             dolphin konsole kate ark gwenview okular \
             plasma-nm plasma-pa kscreen haruna fastfetch \
             xdg-desktop-portal-kde \
-            2>&1 | grep "^\(" | while IFS= read -r l; do printf "\r  ${DIM}%-60s${NC}" "$l"; done
-        echo ""
+            || error "Ошибка установки KDE"
         arch-chroot /mnt systemctl enable sddm &>/dev/null
 
         # Alt+Shift раскладка
@@ -485,8 +502,7 @@ CHROOT
         arch-chroot /mnt pacman -S --noconfirm --needed \
             gnome gnome-extra gdm \
             xdg-desktop-portal-gnome \
-            2>&1 | grep "^\(" | while IFS= read -r l; do printf "\r  ${DIM}%-60s${NC}" "$l"; done
-        echo ""
+            || error "Ошибка установки GNOME"
         arch-chroot /mnt systemctl enable gdm &>/dev/null
         info "GNOME установлен"
         ;;
@@ -496,8 +512,7 @@ CHROOT
         arch-chroot /mnt pacman -S --noconfirm --needed \
             xfce4 xfce4-goodies lightdm lightdm-gtk-greeter \
             xdg-desktop-portal-gtk \
-            2>&1 | grep "^\(" | while IFS= read -r l; do printf "\r  ${DIM}%-60s${NC}" "$l"; done
-        echo ""
+            || error "Ошибка установки XFCE"
         arch-chroot /mnt systemctl enable lightdm &>/dev/null
         info "XFCE установлен"
         ;;
@@ -508,8 +523,7 @@ CHROOT
             hyprland xdg-desktop-portal-hyprland \
             waybar wofi kitty \
             sddm \
-            2>&1 | grep "^\(" | while IFS= read -r l; do printf "\r  ${DIM}%-60s${NC}" "$l"; done
-        echo ""
+            || error "Ошибка установки Hyprland"
         arch-chroot /mnt systemctl enable sddm &>/dev/null
 
         # Базовый конфиг Hyprland
@@ -587,40 +601,47 @@ CHROOT
 # ─── ИГРЫ ─────────────────────────────────────────────────────────────────────
 install_gaming() {
     section "Игровые пакеты"
+    check_mnt
 
-    (arch-chroot /mnt pacman -S --noconfirm --needed \
+    warn "Устанавливаются игровые пакеты..."
+    arch-chroot /mnt pacman -S --noconfirm --needed \
         steam lutris \
         wine wine-mono winetricks \
         gamemode lib32-gamemode \
         mangohud lib32-mangohud \
         gamescope \
-        &>/dev/null) &
-    spinner $! "Steam · Lutris · Wine · GameMode · gamescope"
+        || error "Ошибка установки игровых пакетов"
     info "Игровые пакеты установлены"
 }
 
 # ─── YAY + ПРИЛОЖЕНИЯ ─────────────────────────────────────────────────────────
 install_apps() {
     section "Приложения"
+    check_mnt
 
     # yay
-    (arch-chroot /mnt /bin/bash <<CHROOT
+    warn "Устанавливаю yay..."
+    arch-chroot /mnt /bin/bash <<CHROOT || error "Ошибка установки yay"
 cd /tmp
-sudo -u ${USERNAME} git clone https://aur.archlinux.org/yay.git &>/dev/null
+sudo -u ${USERNAME} git clone https://aur.archlinux.org/yay.git
 cd yay
-sudo -u ${USERNAME} makepkg -si --noconfirm &>/dev/null
+sudo -u ${USERNAME} makepkg -si --noconfirm
 CHROOT
-    ) &
-    spinner $! "Устанавливаю yay (AUR helper)"
+    info "yay установлен"
 
-    # Системные
-    (arch-chroot /mnt pacman -S --noconfirm --needed \
-        obs-studio htop p7zip unrar xdg-utils fastfetch &>/dev/null) &
-    spinner $! "OBS · htop · p7zip · fastfetch"
+    # Системные пакеты
+    warn "Устанавливаю системные пакеты..."
+    arch-chroot /mnt pacman -S --noconfirm --needed \
+        obs-studio htop p7zip unrar xdg-utils fastfetch \
+        nodejs npm \
+        || error "Ошибка установки системных пакетов"
 
-    # AUR
-    warn "AUR пакеты — займёт время..."
-    (arch-chroot /mnt sudo -u ${USERNAME} yay -S --noconfirm \
+    # Claude Code
+    run_bg "Claude Code" arch-chroot /mnt npm install -g @anthropic-ai/claude-code
+
+    # AUR пакеты
+    warn "AUR пакеты — займёт время, вывод идёт ниже..."
+    arch-chroot /mnt sudo -u ${USERNAME} yay -S --noconfirm \
         visual-studio-code-bin \
         zen-browser-bin \
         ayugram-desktop \
@@ -629,21 +650,12 @@ CHROOT
         heroic-games-launcher-bin \
         modrinth-app \
         gruvbox-plus-icon-theme-git \
-        &>/dev/null) &
-    spinner $! "VS Code · Zen · Ayugram · Discord · Spotify · Heroic · Modrinth"
+        || error "Ошибка установки AUR пакетов"
 
     # Discord фикс NVIDIA
     arch-chroot /mnt sed -i \
         's|Exec=/usr/bin/discord|Exec=/usr/bin/discord --use-gl=desktop|' \
         /usr/share/applications/discord.desktop 2>/dev/null || true
-
-    # Claude Code
-    (arch-chroot /mnt /bin/bash <<CHROOT
-pacman -S --noconfirm nodejs npm &>/dev/null
-npm install -g @anthropic-ai/claude-code &>/dev/null
-CHROOT
-    ) &
-    spinner $! "Claude Code (AI в терминале)"
 
     # fastfetch конфиг
     arch-chroot /mnt /bin/bash <<CHROOT
@@ -755,4 +767,3 @@ install_gaming
 install_apps
 setup_dns
 finish
-
