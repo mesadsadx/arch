@@ -369,6 +369,10 @@ setup_mirrors() {
     fi
 
     run_bg "Синхронизирую репозитории" pacman -Sy --noconfirm
+
+    # Обновляем keyring — без этого pacstrap падает с ошибкой подписи
+    run_bg "Обновляю keyring (исправляет ошибки подписей)" \
+        pacman -S --noconfirm --needed archlinux-keyring
 }
 
 # ─── БАЗОВАЯ СИСТЕМА ──────────────────────────────────────────────────────────
