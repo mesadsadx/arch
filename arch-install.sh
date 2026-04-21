@@ -351,7 +351,18 @@ format_and_mount() {
     mkdir -p /mnt/boot
     mount "$EFI_PART" /mnt/boot
 
-    info "Разделы смонтированы"
+    # DNS и зеркала сразу в целевую систему
+    mkdir -p /mnt/etc
+    echo "nameserver 8.8.8.8" > /mnt/etc/resolv.conf
+    mkdir -p /mnt/etc/pacman.d
+    cat > /mnt/etc/pacman.d/mirrorlist <<'EOF'
+Server = https://mirror.yandex.ru/archlinux/$repo/os/$arch
+Server = https://archlinux.uk.mirror.allworldit.com/archlinux/$repo/os/$arch
+Server = https://mirror.osbeck.com/archlinux/$repo/os/$arch
+Server = https://geo.mirror.pkgbuild.com/$repo/os/$arch
+EOF
+
+    info "Разделы смонтированы · DNS и зеркала прописаны"
 }
 
 # ─── ЗЕРКАЛА И PACMAN ─────────────────────────────────────────────────────────
@@ -360,7 +371,10 @@ setup_mirrors() {
 
     sed -i "s/#ParallelDownloads = 5/ParallelDownloads = ${PARALLEL_DL}/" /etc/pacman.conf 2>/dev/null || true
 
-    # Сначала принудительно ставим быстрые зеркала
+    # DNS для live системы
+    echo "nameserver 8.8.8.8" > /etc/resolv.conf
+
+    # Быстрые зеркала для live системы
     cat > /etc/pacman.d/mirrorlist <<'EOF'
 Server = https://mirror.yandex.ru/archlinux/$repo/os/$arch
 Server = https://archlinux.uk.mirror.allworldit.com/archlinux/$repo/os/$arch
