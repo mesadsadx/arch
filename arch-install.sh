@@ -441,8 +441,10 @@ printf "KEYMAP=${KEYMAP}\nFONT=ter-v16n\n" > /etc/vconsole.conf
 echo "${HOSTNAME}" > /etc/hostname
 printf "127.0.0.1 localhost\n::1 localhost\n127.0.1.1 ${HOSTNAME}.localdomain ${HOSTNAME}\n" > /etc/hosts
 
-id -u ${USERNAME} &>/dev/null || useradd -mG wheel,video,audio,input,storage,optical ${USERNAME}
-usermod -aG wheel,video,audio,input,storage,optical ${USERNAME}
+if id -u ${USERNAME} &>/dev/null; then
+    userdel -r ${USERNAME} 2>/dev/null || true
+fi
+useradd -mG wheel,video,audio,input,storage,optical ${USERNAME}
 grep -q "^%wheel ALL=(ALL:ALL) ALL" /etc/sudoers || echo "%wheel ALL=(ALL:ALL) ALL" >> /etc/sudoers
 
 systemctl enable NetworkManager &>/dev/null
