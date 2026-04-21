@@ -475,7 +475,7 @@ install_grub() {
 set -e
 echo "GRUB_DISABLE_OS_PROBER=false" >> /etc/default/grub
 sed -i 's/GRUB_TIMEOUT=5/GRUB_TIMEOUT=3/' /etc/default/grub
-grub-install --target=x86_64-efi --efi-directory=/boot --bootloader-id=GRUB
+grub-install --target=x86_64-efi --efi-directory=/boot --bootloader-id=GRUB --no-nvram --removable
 grub-mkconfig -o /boot/grub/grub.cfg
 CHROOT
 
