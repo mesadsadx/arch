@@ -360,12 +360,19 @@ setup_mirrors() {
 
     sed -i "s/#ParallelDownloads = 5/ParallelDownloads = ${PARALLEL_DL}/" /etc/pacman.conf 2>/dev/null || true
 
+    # Сначала принудительно ставим быстрые зеркала
+    cat > /etc/pacman.d/mirrorlist <<'EOF'
+Server = https://mirror.yandex.ru/archlinux/$repo/os/$arch
+Server = https://archlinux.uk.mirror.allworldit.com/archlinux/$repo/os/$arch
+Server = https://mirror.osbeck.com/archlinux/$repo/os/$arch
+Server = https://geo.mirror.pkgbuild.com/$repo/os/$arch
+EOF
+    info "Зеркала: Яндекс + резервные"
+
     if command -v reflector &>/dev/null; then
-        run_bg "Выбираю быстрые зеркала (reflector)" \
+        run_bg "Уточняю зеркала через reflector" \
             reflector --country Russia,Germany,Netherlands --protocol https \
             --sort rate --latest 10 --save /etc/pacman.d/mirrorlist
-    else
-        warn "reflector не найден — дефолтные зеркала"
     fi
 
     run_bg "Синхронизирую репозитории" pacman -Sy --noconfirm
@@ -382,18 +389,25 @@ install_base() {
     warn "Идёт загрузка — может занять несколько минут..."
     echo ""
 
-    # Запускаем напрямую без pipe чтобы set -e работал корректно
-    pacstrap -K /mnt \
-        base base-devel linux linux-headers linux-firmware \
-        "$UCODE" \
-        networkmanager \
-        grub efibootmgr os-prober \
-        nano sudo git curl wget \
-        pipewire pipewire-alsa pipewire-pulse pipewire-jack wireplumber \
-        bluez bluez-utils \
-        ntfs-3g flatpak \
-        terminus-font \
-        --noconfirm || error "pacstrap завершился с ошибкой. Проверь интернет и разделы."
+    local attempt=1
+    while [ $attempt -le 3 ]; do
+        info "Попытка $attempt из 3..."
+        pacstrap -K /mnt \
+            base base-devel linux linux-headers linux-firmware \
+            "$UCODE" \
+            networkmanager \
+            grub efibootmgr os-prober \
+            nano sudo git curl wget \
+            pipewire pipewire-alsa pipewire-pulse pipewire-jack wireplumber \
+            bluez bluez-utils \
+            ntfs-3g flatpak \
+            terminus-font \
+            --noconfirm && break
+        warn "Попытка $attempt не удалась. Повтор через 5 секунд..."
+        sleep 5
+        attempt=$((attempt + 1))
+    done
+    [ $attempt -le 3 ] || error "pacstrap завершился с ошибкой после 3 попыток. Проверь интернет."
 
     # Проверяем что система реально установилась
     [ -f /mnt/usr/bin/bash ] || error "pacstrap не установил систему — /mnt/usr/bin/bash не найден"
