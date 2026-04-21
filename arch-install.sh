@@ -105,54 +105,28 @@ section() {
     echo ""
 }
 
-# ─── МЕНЮ СО СТРЕЛКАМИ ────────────────────────────────────────────────────────
+# ─── МЕНЮ С ЦИФРАМИ ───────────────────────────────────────────────────────────
 # Возвращает индекс в MENU_RESULT
 arrow_menu() {
     local prompt="$1"; shift
     local options=("$@")
-    local selected=0
     local count=${#options[@]}
-    local key key2
+    local choice
 
-    tput civis 2>/dev/null || true
-
-    _draw_menu() {
-        echo -e "  ${C}${BOLD}$prompt${NC}\n"
-        for i in "${!options[@]}"; do
-            if [ "$i" -eq "$selected" ]; then
-                echo -e "  ${B}❯${NC} ${W}${options[$i]}${NC}"
-            else
-                echo -e "    ${DIM}${options[$i]}${NC}"
-            fi
-        done
-        echo -e "\n  ${DIM}стрелки ↑↓ · Enter — подтвердить${NC}"
-    }
-
-    _draw_menu
+    echo -e "  ${C}${BOLD}$prompt${NC}\n"
+    for i in "${!options[@]}"; do
+        echo -e "  ${B}$((i+1))${NC}  ${options[$i]}"
+    done
+    echo ""
 
     while true; do
-        # Читаем клавишу — без set -e влияния
-        IFS= read -rsn1 key || true
-
-        if [[ "$key" == $'\x1b' ]]; then
-            key2=""
-            IFS= read -rsn2 -t 0.15 key2 || true
-            case "$key2" in
-                '[A') [ "$selected" -gt 0 ] && selected=$((selected - 1)) ;;
-                '[B') [ "$selected" -lt $((count - 1)) ] && selected=$((selected + 1)) ;;
-            esac
-        elif [[ -z "$key" ]]; then
+        read -rp "  Введи номер [1-${count}]: " choice
+        if [[ "$choice" =~ ^[0-9]+$ ]] && [ "$choice" -ge 1 ] && [ "$choice" -le "$count" ]; then
+            MENU_RESULT=$((choice - 1))
             break
         fi
-
-        # Перерисовываем меню на месте
-        tput cuu $((count + 4)) 2>/dev/null || true
-        tput ed 2>/dev/null || true
-        _draw_menu
+        warn "Введи число от 1 до ${count}"
     done
-
-    tput cnorm 2>/dev/null || true
-    MENU_RESULT=$selected
 }
 
 # ─── АВТОДЕТЕКТ ЖЕЛЕЗА ────────────────────────────────────────────────────────
